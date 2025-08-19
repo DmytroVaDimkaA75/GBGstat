@@ -2,33 +2,74 @@
 <html lang="uk">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>FoE BG Tracker</title>
+  <title>FoE GBG – Provinces</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font: 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 10px; min-width: 320px; }
-    h1 { font-size: 14px; margin: 0 0 8px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #eee; padding: 4px; text-align: left; }
-    th { background: #fafafa; }
-    .muted { color:#777; }
-    .right { text-align:right; }
+    :root {
+      --bg: #0f1115;
+      --card: #171a21;
+      --muted: #9aa4b2;
+      --ok: #3ecf8e;
+      --warn: #f9c74f;
+      --danger: #f94144;
+      --border: #232835;
+      --accent: #61dafb;
+    }
+    html, body {
+      margin:0; padding:0; background:var(--bg); color:#e6edf3;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    .wrap { width: 380px; max-height: 600px; overflow:auto; }
+    header {
+      position: sticky; top:0; z-index:2;
+      background:var(--card);
+      border-bottom:1px solid var(--border);
+      padding:10px 12px;
+    }
+    h1 { font-size:16px; margin:0 0 4px 0; }
+    .meta { font-size:12px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; }
+    .list { padding:10px 8px 12px; display:flex; flex-direction:column; gap:8px; }
+    .item {
+      display:flex; gap:10px; align-items:center; justify-content:space-between;
+      background:var(--card); border:1px solid var(--border); border-radius:10px; padding:8px 10px;
+    }
+    .title { display:flex; gap:8px; align-items:center; min-width:0; }
+    .short {
+      background:#2a2f3a; border:1px solid var(--border);
+      color:#e6edf3; padding:2px 6px; border-radius:7px; font-size:11px;
+    }
+    .name { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
+    .owner { color:var(--muted); font-size:12px; }
+    .state { text-align:right; }
+    .chip {
+      padding:2px 6px; border-radius:999px; font-size:11px; border:1px solid var(--border);
+    }
+    .open { background:#15371f; color:var(--ok); }
+    .locked { background:#3a2a15; color:var(--warn); }
+    .owner-chip { background:#1d2430; color:#c8d1e0; }
+    .empty { color:var(--muted); text-align:center; padding:28px 8px; }
+    .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+    .accent { color: var(--accent); }
   </style>
 </head>
 <body>
-  <h1>Guild Battlegrounds</h1>
-  <div id="meta" class="muted">завантаження…</div>
-  <table id="tbl" hidden>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Сектор</th>
-        <th class="right">Відкриється</th>
-        <th class="right">Власник</th>
-        <th>Прогрес</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <div class="wrap">
+    <header>
+      <h1>Guild Battlegrounds</h1>
+      <div class="meta">
+        <div id="provCount">Провінцій: 0</div>
+        <div id="guildCount">Гільдій: 0</div>
+        <div id="lastUpdated">Оновлено: —</div>
+      </div>
+    </header>
+
+    <div class="list" id="list"></div>
+    <div class="empty" id="empty" style="display:none">
+      Немає даних. Відкрий карту GBG у грі, зачекай кілька секунд, потім оновіть попап.
+      <div class="hint">Порада: лишіть мапу відкритою на 5–10 с, щоби розширення встигло зібрати стан.</div>
+    </div>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
