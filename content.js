@@ -1,16 +1,16 @@
-console.log("FoE Tracker активний");
+(function(){
+  const TAG='[GBG/content]';
+  console.log(TAG,'start: injecting pageHook');
+  const s=document.createElement('script');
+  s.src=chrome.runtime.getURL('pageHook.js');
+  s.onload=()=>s.remove();
+  (document.head||document.documentElement).appendChild(s);
 
-// приклад: слухати всі XHR
-(function(open) {
-  XMLHttpRequest.prototype.open = function(method, url) {
-    this.addEventListener("load", function() {
-      if (url.includes("getBattleground")) {
-        try {
-          let data = JSON.parse(this.responseText);
-          console.log("Battleground data:", data);
-        } catch(e) {}
-      }
-    });
-    open.apply(this, arguments);
-  };
-})(XMLHttpRequest.prototype.open);
+  window.addEventListener('message',(ev)=>{
+    if (!ev.data || ev.source!==window) return;
+    if (ev.data.__foe_hook__===true){
+      console.log(TAG,'forward', ev.data.kind);
+      chrome.runtime.sendMessage(ev.data);
+    }
+  });
+})();
