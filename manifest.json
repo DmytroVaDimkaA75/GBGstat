@@ -12,9 +12,12 @@
     "default_popup": "popup.html"
   },
   "content_scripts": [
-    {
-      "matches": ["https://*.forgeofempires.com/*"],
-      "js": ["content.js"]
-    }
-  ]
+  {
+    "matches": ["https://*.forgeofempires.com/game/*"],
+    "js": ["content.js"],
+    "run_at": "document_start",
+    "all_frames": true,
+    "match_about_blank": true
+  }
+]
 }
