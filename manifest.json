@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "FoE Battleground Tracker",
+  "version": "0.1",
+  "description": "Знімає інформацію про сектори у Guild Battlegrounds",
+  "permissions": ["storage", "scripting", "tabs"],
+  "host_permissions": ["https://*.forgeofempires.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.forgeofempires.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
