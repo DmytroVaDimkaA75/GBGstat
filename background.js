@@ -1,128 +1,75 @@
-// Глобальний стан
 const STATE = {
-  participants: [],      // [{participantId, clan:{id,name,flag}}, ...]
-  provinces: [],         // [{id,title,short,ownerId,lockedUntil,isAttackBattleType}, ...]
-  lastFullMapAt: 0,      // Date.now() коли прийшла повна карта з WS
-  meta: { mapId: null }, // volcano_archipelago / waterfall_archipelago
+  participants: [],   // [{participantId, clan:{id,name,flag}}]
+  provinces: [],      // [{id,title,ownerId,ownerName,lockedUntil,isOpen,isAttackBattleType}]
+  mapId: null,
+  updatedAt: 0,
 };
 
-// ——— утиліти ———
 const toInt = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : 0;
 };
-const notEmpty = (x) => x !== undefined && x !== null;
+const nowSec = () => Math.trunc(Date.now() / 1000);
 
-// мапа для швидкого мерджу по id
-const indexBy = (arr, key) => {
+const buildParticipantsMap = (arr) => {
   const m = new Map();
-  for (const x of arr || []) m.set(x?.[key], x);
+  for (const p of arr || []) {
+    const pid = p?.participantId ?? p?.id;
+    const name = p?.clan?.name || "";
+    if (pid != null) m.set(pid, name);
+  }
   return m;
 };
 
-// ——— нормалізація провінцій зі WS (живий стан) ———
 function applyWsBattleground(rd) {
-  // структура rd (узагальнено): { map:{id,provinces:[{id,title,ownerId,lockedUntil,isAttackBattleType,conquestProgress:[]}, ...]}, battlegroundParticipants:[...] }
-  const map = rd?.map;
+  const provinces = rd?.map?.provinces;
   const parts = rd?.battlegroundParticipants;
+  if (!Array.isArray(provinces) || !Array.isArray(parts)) return;
 
-  if (Array.isArray(parts)) {
-    STATE.participants = parts.map((p) => ({
-      participantId: p?.participantId ?? p?.id ?? null,
-      clan: { id: p?.clan?.id ?? null, name: p?.clan?.name ?? "", flag: p?.clan?.flag ?? "" },
-    })).filter(x => notEmpty(x.participantId));
-  }
+  STATE.mapId = rd.map.id || STATE.mapId;
+  const nameByPid = buildParticipantsMap(parts);
+  const t = nowSec();
 
-  if (map?.provinces && Array.isArray(map.provinces)) {
-    const now = Date.now();
+  STATE.participants = parts.map(p => ({
+    participantId: p?.participantId ?? p?.id ?? null,
+    clan: { id: p?.clan?.id ?? null, name: p?.clan?.name ?? "", flag: p?.clan?.flag ?? "" }
+  })).filter(x => x.participantId !== null);
 
-    // мерджимо з уже відомими назвами/short (прийдуть з HTTP JSON)
-    const prevIdx = indexBy(STATE.provinces, "id");
+  STATE.provinces = provinces.map(p => {
+    const id   = p.id;
+    const ttl  = p.title || "";                         // у більшості світів title тут є
+    const own  = (p.ownerId !== undefined) ? p.ownerId : null;
+    const lock = toInt(p.lockedUntil);                  // сек (unix), 0/undefined => відкрито
+    const open = !lock || lock <= t;
 
-    const next = map.provinces.map((p) => {
-      const prev = prevIdx.get(p.id) || {};
-      const lockedUntil = toInt(p.lockedUntil); // у секундах (unix)
-
-      return {
-        id: p.id,
-        title: prev.title ?? p.title ?? "", // назву збережемо, якщо FoE її дав; зазвичай беремо з HTTP
-        short: prev.short ?? p.short ?? "",
-        ownerId: notEmpty(p.ownerId) ? p.ownerId : (prev.ownerId ?? null),
-        lockedUntil: lockedUntil > 0 ? lockedUntil : 0,
-        isAttackBattleType: !!p.isAttackBattleType,
-      };
-    });
-
-    STATE.provinces = next;
-    STATE.meta.mapId = map.id || STATE.meta.mapId;
-    STATE.lastFullMapAt = now;
-  }
-}
-
-// ——— нормалізація назв/short з HTTP (статичні провінції) ———
-function applyHttpProvinces(url, json) {
-  // Очікуємо масив об'єктів [{id, name, short, connections, ...}, ...] або об'єкт з таким масивом
-  const arr = Array.isArray(json) ? json : (Array.isArray(json?.provinces) ? json.provinces : null);
-  if (!Array.isArray(arr) || arr.length === 0) return;
-
-  const prevIdx = indexBy(STATE.provinces, "id");
-  const patch = [];
-
-  for (const raw of arr) {
-    const id = raw?.id;
-    if (!notEmpty(id)) continue;
-
-    const prev = prevIdx.get(id) || {};
-    const rec = {
+    return {
       id,
-      title: raw.name || raw.title || prev.title || "",
-      short: raw.short || prev.short || "",
-      ownerId: prev.ownerId ?? null,
-      lockedUntil: prev.lockedUntil ?? 0,
-      isAttackBattleType: prev.isAttackBattleType ?? false,
+      title: ttl,
+      ownerId: own,
+      ownerName: own != null ? (nameByPid.get(own) || `#${own}`) : "Ніхто",
+      lockedUntil: lock > 0 ? lock : 0,
+      isOpen: open,
+      isAttackBattleType: !!p.isAttackBattleType,
     };
-    patch.push(rec);
-  }
+  });
 
-  // зливаємо: провінції з WS мають пріоритет у полях owner/lockedUntil
-  const merged = indexBy(STATE.provinces, "id");
-  for (const p of patch) {
-    if (merged.has(p.id)) {
-      const cur = merged.get(p.id);
-      merged.set(p.id, {
-        ...cur,
-        title: p.title || cur.title,
-        short: p.short || cur.short,
-      });
-    } else {
-      merged.set(p.id, p);
-    }
-  }
-  STATE.provinces = Array.from(merged.values());
+  STATE.updatedAt = Date.now();
+
+  // Для дебагу — чіткий підсумок у консолі розширення
+  console.log("[GBG] provinces:", STATE.provinces.length,
+              "participants:", STATE.participants.length,
+              "map:", STATE.mapId);
+  console.table(STATE.provinces.map(p => ({
+    id: p.id, title: p.title, owner: p.ownerName,
+    status: p.isOpen ? "відкрито" : `закрито до ${new Date(p.lockedUntil*1000).toLocaleTimeString()}`
+  })));
 }
 
-// ——— прийом повідомлень від content.js ———
+// Прийом із content
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  try {
-    if (msg?.type === "WS_GBG" && msg.json) {
-      applyWsBattleground(msg.json);
-    } else if (msg?.type === "HTTP_JSON" && msg.url && msg.json) {
-      // фільтрація: беремо лише `…/map/provinces/*.json`
-      if (/\/assets\/guild_battlegrounds\/map\/provinces\/.+\.json(\?|$)/i.test(msg.url)) {
-        applyHttpProvinces(msg.url, msg.json);
-      }
-    } else if (msg?.type === "getState") {
-      sendResponse({ state: STATE });
-      return; // важливо: для async відповіді
-    }
-  } catch (e) {
-    console.warn("bg parse error:", e);
+  if (msg?.type === "WS_GBG" && msg.json) {
+    applyWsBattleground(msg.json);
   }
-  // до popup ми не відповідаємо (крім getState)
-});
-
-// ——— відповідь для popup ———
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "getState") {
     sendResponse({ state: STATE });
   }
