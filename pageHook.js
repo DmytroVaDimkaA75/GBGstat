@@ -9,7 +9,14 @@
   post({ kind: "ping", from: "pageHook" });
 
   // ---- евристики для розпізнавання GBG ----
-  const URL_HINTS = ["Battleground", "battleground", "GuildBattleground", "guild_battleground"];
+  const URL_HINTS = [
+    "Battleground",
+    "battleground",
+    "GuildBattleground",
+    "guild_battleground",
+    // статичні json з мапами/префабами
+    "/assets/guild_battlegrounds/"
+  ];
   const BODY_KEYS = ["requestClass","responseClass","class","service","requestMethod"];
 
   const looksLikeGBGUrl = (url = "") => URL_HINTS.some(k => url.includes(k));
@@ -17,12 +24,12 @@
     try {
       const cls = BODY_KEYS.map(k => obj?.[k]).filter(Boolean).join(" ");
       if (/(Guild)?Battleground/i.test(cls)) return true;
-      // іноді немає класів — шукаємо в JSON
       return /Battleground|guild_battleground/i.test(JSON.stringify(obj));
-    } catch {
-      return false;
-    }
+    } catch { return false; }
   };
+
+  const isGBGAssetUrl = (url = "") =>
+    /\/assets\/guild_battlegrounds\/.*\.json/i.test(url);
 
   // ---------- fetch -----------
   const _fetch = window.fetch;
@@ -31,14 +38,18 @@
     try {
       const url = typeof input === "string" ? input : input?.url || "";
       if (!url) return res;
+
       if (!looksLikeGBGUrl(url)) return res;
 
       const clone = res.clone();
       clone.json().then((body) => {
-        const isGBG = looksLikeGBGBody(body);
+        const isAsset = isGBGAssetUrl(url);
+        const isGBG = isAsset || looksLikeGBGBody(body);
         console.log(TAG, "xhr/fetch hit", url, isGBG ? "GBG✅" : "maybe");
-        if (isGBG) post({ kind: "http", url, body });
-      }).catch(() => {/* не JSON – ігноруємо */});
+        if (isGBG) {
+          post({ kind: isAsset ? "asset" : "http", url, body });
+        }
+      }).catch(() => {/* не JSON */});
     } catch {}
     return res;
   };
@@ -52,12 +63,13 @@
       try {
         const url = this._url || "";
         if (!looksLikeGBGUrl(url)) return;
-        const ct = this.getResponseHeader("content-type") || "";
-        if (!ct.includes("application/json")) return;
+        const ct = (this.getResponseHeader("content-type") || "").toLowerCase();
+        if (!ct.includes("application/json") && !/\.json(\?|$)/i.test(url)) return;
         const body = JSON.parse(this.responseText);
-        const isGBG = looksLikeGBGBody(body);
+        const isAsset = isGBGAssetUrl(url);
+        const isGBG = isAsset || looksLikeGBGBody(body);
         console.log(TAG, "xhr hit", url, isGBG ? "GBG✅" : "maybe");
-        if (isGBG) post({ kind: "http", url, body });
+        if (isGBG) post({ kind: isAsset ? "asset" : "http", url, body });
       } catch {}
     });
     return _send.apply(this, arguments);
