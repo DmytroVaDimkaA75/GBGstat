@@ -1,93 +1,105 @@
-// [GBG/hook] runs in page context
-(function () {
-  const TAG = "[GBG/hook]";
-
-  console.log(TAG, "injected");
-  const post = (payload) => {
-    try { window.postMessage({ __foe_hook__: true, ...payload }, "*"); } catch {}
-  };
-  post({ kind: "ping", from: "pageHook" });
-
-  // ---- евристики для розпізнавання GBG ----
-  const URL_HINTS = [
-    "Battleground",
-    "battleground",
-    "GuildBattleground",
-    "guild_battleground",
-    // статичні json з мапами/префабами
-    "/assets/guild_battlegrounds/"
-  ];
-  const BODY_KEYS = ["requestClass","responseClass","class","service","requestMethod"];
-
-  const looksLikeGBGUrl = (url = "") => URL_HINTS.some(k => url.includes(k));
-  const looksLikeGBGBody = (obj) => {
-    try {
-      const cls = BODY_KEYS.map(k => obj?.[k]).filter(Boolean).join(" ");
-      if (/(Guild)?Battleground/i.test(cls)) return true;
-      return /Battleground|guild_battleground/i.test(JSON.stringify(obj));
-    } catch { return false; }
+// Вставляється у сторінку через <script> з content.js
+(() => {
+  const GBG_MSG = (payload) => {
+    window.postMessage({ __gbg__: true, ...payload }, "*");
   };
 
-  const isGBGAssetUrl = (url = "") =>
-    /\/assets\/guild_battlegrounds\/.*\.json/i.test(url);
+  // -------------------- HTTP: fetch/XMLHttpRequest --------------------
+  const isInterestingURL = (url) => {
+    // 1) статика з провінціями (дає name/short/links)
+    if (/\/assets\/guild_battlegrounds\/map\/provinces\/.+\.json(\?|$)/i.test(url)) return true;
+    // 2) інколи карта /map/background/.*.json також приходить — не потрібна
+    // 3) метадані id=battleground_maps/… можуть знадобитись, але вони без власників — ігноруємо
+    return false;
+  };
 
-  // ---------- fetch -----------
-  const _fetch = window.fetch;
-  window.fetch = async function (input, init) {
-    const res = await _fetch(input, init);
+  const parseJSONSafe = async (resp) => {
+    try { return await resp.clone().json(); } catch { return null; }
+  };
+
+  // fetch
+  const origFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const res = await origFetch.apply(this, args);
     try {
-      const url = typeof input === "string" ? input : input?.url || "";
-      if (!url) return res;
-
-      if (!looksLikeGBGUrl(url)) return res;
-
-      const clone = res.clone();
-      clone.json().then((body) => {
-        const isAsset = isGBGAssetUrl(url);
-        const isGBG = isAsset || looksLikeGBGBody(body);
-        console.log(TAG, "xhr/fetch hit", url, isGBG ? "GBG✅" : "maybe");
-        if (isGBG) {
-          post({ kind: isAsset ? "asset" : "http", url, body });
+      const url = String(args[0]?.url || args[0]);
+      if (isInterestingURL(url)) {
+        const json = await parseJSONSafe(res);
+        if (json && typeof json === "object") {
+          GBG_MSG({ kind: "HTTP_JSON", url, json });
         }
-      }).catch(() => {/* не JSON */});
+      }
     } catch {}
     return res;
   };
 
-  // ---------- XHR -------------
-  const _open = XMLHttpRequest.prototype.open;
-  const _send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (m, u) { this._url = u; return _open.apply(this, arguments); };
-  XMLHttpRequest.prototype.send = function () {
+  // xhr
+  const origOpen = XMLHttpRequest.prototype.open;
+  const origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, async, user, pass) {
+    this.__gbg_url = url;
+    return origOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
     this.addEventListener("load", () => {
       try {
-        const url = this._url || "";
-        if (!looksLikeGBGUrl(url)) return;
-        const ct = (this.getResponseHeader("content-type") || "").toLowerCase();
-        if (!ct.includes("application/json") && !/\.json(\?|$)/i.test(url)) return;
-        const body = JSON.parse(this.responseText);
-        const isAsset = isGBGAssetUrl(url);
-        const isGBG = isAsset || looksLikeGBGBody(body);
-        console.log(TAG, "xhr hit", url, isGBG ? "GBG✅" : "maybe");
-        if (isGBG) post({ kind: isAsset ? "asset" : "http", url, body });
+        const url = String(this.__gbg_url || "");
+        if (isInterestingURL(url)) {
+          const text = this.responseText || "";
+          try {
+            const json = JSON.parse(text);
+            if (json && typeof json === "object") {
+              GBG_MSG({ kind: "HTTP_JSON", url, json });
+            }
+          } catch {}
+        }
       } catch {}
     });
-    return _send.apply(this, arguments);
+    return origSend.apply(this, arguments);
   };
 
-  // ---------- WebSocket -------
-  const _WS = window.WebSocket;
-  window.WebSocket = function (url, protocols) {
-    const ws = protocols ? new _WS(url, protocols) : new _WS(url);
+  // -------------------- WebSocket: GuildBattlegroundService --------------------
+  const origWS = window.WebSocket;
+  window.WebSocket = function (...args) {
+    const ws = new origWS(...args);
+
+    const origSend = ws.send;
+    ws.send = function (data) {
+      try {
+        // нічого не фільтруємо тут, головне — чути відповіді
+      } catch {}
+      return origSend.apply(ws, arguments);
+    };
+
     ws.addEventListener("message", (ev) => {
       try {
-        const data = JSON.parse(ev.data);
-        if (/Battleground|guild_battleground/i.test(JSON.stringify(data))) {
-          console.log(TAG, "ws hit GBG✅");
-          post({ kind: "ws", msg: data });
+        const data = typeof ev.data === "string" ? ev.data : "";
+        // На клієнті FoE це JSON масив або об'єкт
+        // шукаємо відповіді GuildBattlegroundService.getBattleground
+        const parsed = JSON.parse(data);
+        const frames = Array.isArray(parsed) ? parsed : [parsed];
+
+        for (const f of frames) {
+          const m = f?.requestClass || f?.className || f?.type;
+          const n = f?.requestMethod || f?.methodName || f?.method;
+          const rd = f?.responseData ?? f?.data ?? f?.payload;
+
+          // універсальні поля у клієнта FoE можуть відрізнятись між світами, залишаємо три варіанти
+          if (
+            (m === "GuildBattlegroundService" && (n === "getBattleground" || n === "getState")) ||
+            (m === "GuildBattlegroundStateService" && n === "getState")
+          ) {
+            if (rd && typeof rd === "object") {
+              // ці відповіді містять map.provinces + battlegroundParticipants
+              GBG_MSG({ kind: "WS_GBG", json: rd });
+            }
+          }
         }
-      } catch { /* не JSON */ }
+      } catch {
+        // ігноруємо не-JSON
+      }
     });
+
     return ws;
   };
 })();

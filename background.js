@@ -1,149 +1,129 @@
-// [GBG/bg] service worker (MV3)
-const TAG = "[GBG/bg]";
-
-// Поточний стан
-let state = {
-  lastFullMapAt: 0,
-  provinces: [],       // live-стан (ownerId, lockedUntil, progress, ...)
-  participants: [],
-  provinceMeta: []     // статичні метадані (назва/short/конекшени)
+// Глобальний стан
+const STATE = {
+  participants: [],      // [{participantId, clan:{id,name,flag}}, ...]
+  provinces: [],         // [{id,title,short,ownerId,lockedUntil,isAttackBattleType}, ...]
+  lastFullMapAt: 0,      // Date.now() коли прийшла повна карта з WS
+  meta: { mapId: null }, // volcano_archipelago / waterfall_archipelago
 };
 
-// Хелпери
-const asArray = (v) => Array.isArray(v) ? v : [];
+// ——— утиліти ———
 const toInt = (v) => {
   const n = Number(v);
-  return Number.isFinite(n) ? Math.floor(n) : 0;
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+};
+const notEmpty = (x) => x !== undefined && x !== null;
+
+// мапа для швидкого мерджу по id
+const indexBy = (arr, key) => {
+  const m = new Map();
+  for (const x of arr || []) m.set(x?.[key], x);
+  return m;
 };
 
-chrome.runtime.onInstalled.addListener(() => {
-  console.log(TAG, "installed");
-});
+// ——— нормалізація провінцій зі WS (живий стан) ———
+function applyWsBattleground(rd) {
+  // структура rd (узагальнено): { map:{id,provinces:[{id,title,ownerId,lockedUntil,isAttackBattleType,conquestProgress:[]}, ...]}, battlegroundParticipants:[...] }
+  const map = rd?.map;
+  const parts = rd?.battlegroundParticipants;
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  try {
-    if (!msg || typeof msg !== "object") return;
-
-    if (msg.type === "getState") { sendResponse({ ok: true, state }); return true; }
-    if (msg.type === "ping") { console.log(TAG, "ping from content"); return; }
-
-    if (msg.type === "http") { handleHttp(msg.url, msg.body); return; }
-    if (msg.type === "asset") { handleAsset(msg.url, msg.body); return; }
-    if (msg.type === "ws") { handleWs(msg.msg); return; }
-  } catch (e) {
-    console.warn(TAG, "onMessage error", e);
-  }
-});
-
-function handleHttp(url, body) {
-  const full = extractFullMap(body);
-  if (full) {
-    state.provinces = enrichWithMeta(normaliseProvinces(full.provinces));
-    state.participants = full.participants;
-    state.lastFullMapAt = Date.now();
-    console.log(TAG, `FULL_MAP saved. provinces: ${state.provinces.length}, participants: ${state.participants.length}`);
-  }
-}
-
-function handleAsset(url, body) {
-  // 1) провінції (waterfall_archipelago / volcano_archipelago)
-  if (/\/assets\/guild_battlegrounds\/map\/provinces\/.*\.json/i.test(url)) {
-    const meta = extractProvinceMeta(body);
-    if (meta.length) {
-      state.provinceMeta = meta;
-      // збагачуємо вже наявний live-стан назвами/short/links
-      state.provinces = enrichWithMeta(state.provinces);
-      console.log(TAG, `PROVINCE_META saved: ${meta.length}`);
-    }
-    return;
+  if (Array.isArray(parts)) {
+    STATE.participants = parts.map((p) => ({
+      participantId: p?.participantId ?? p?.id ?? null,
+      clan: { id: p?.clan?.id ?? null, name: p?.clan?.name ?? "", flag: p?.clan?.flag ?? "" },
+    })).filter(x => notEmpty(x.participantId));
   }
 
-  // 2) інші json (hud, log) – можна додати за потреби
-}
+  if (map?.provinces && Array.isArray(map.provinces)) {
+    const now = Date.now();
 
-function handleWs(data) {
-  try {
-    const entries = asArray(data?.responseData);
-    entries.forEach((e) => {
-      if (e?.id == null) return;
-      const p = state.provinces.find(x => x.id === e.id);
-      if (!p) return;
-      if (e.conquestProgress) p.conquestProgress = e.conquestProgress;
-      if (e.ownerId !== undefined) p.ownerId = e.ownerId;
-      if (e.lockedUntil !== undefined) p.lockedUntil = toInt(e.lockedUntil);
-      if (e.isAttackBattleType !== undefined) p.isAttackBattleType = !!e.isAttackBattleType;
-      // збережемо назву/short, якщо метадані прийшли пізніше
-      const meta = state.provinceMeta.find(m => m.id === e.id);
-      if (meta) Object.assign(p, pickMeta(meta));
+    // мерджимо з уже відомими назвами/short (прийдуть з HTTP JSON)
+    const prevIdx = indexBy(STATE.provinces, "id");
+
+    const next = map.provinces.map((p) => {
+      const prev = prevIdx.get(p.id) || {};
+      const lockedUntil = toInt(p.lockedUntil); // у секундах (unix)
+
+      return {
+        id: p.id,
+        title: prev.title ?? p.title ?? "", // назву збережемо, якщо FoE її дав; зазвичай беремо з HTTP
+        short: prev.short ?? p.short ?? "",
+        ownerId: notEmpty(p.ownerId) ? p.ownerId : (prev.ownerId ?? null),
+        lockedUntil: lockedUntil > 0 ? lockedUntil : 0,
+        isAttackBattleType: !!p.isAttackBattleType,
+      };
     });
-  } catch (e) {
-    console.warn(TAG, "handleWs error", e);
+
+    STATE.provinces = next;
+    STATE.meta.mapId = map.id || STATE.meta.mapId;
+    STATE.lastFullMapAt = now;
   }
 }
 
-/* ---------- парсери ---------- */
+// ——— нормалізація назв/short з HTTP (статичні провінції) ———
+function applyHttpProvinces(url, json) {
+  // Очікуємо масив об'єктів [{id, name, short, connections, ...}, ...] або об'єкт з таким масивом
+  const arr = Array.isArray(json) ? json : (Array.isArray(json?.provinces) ? json.provinces : null);
+  if (!Array.isArray(arr) || arr.length === 0) return;
 
-function extractFullMap(body) {
-  if (!body || typeof body !== "object") return null;
+  const prevIdx = indexBy(STATE.provinces, "id");
+  const patch = [];
 
-  // формат: { map:{provinces:[...]}, battlegroundParticipants:[...] }
-  const mapProv = body?.map?.provinces;
-  const parts   = body?.battlegroundParticipants;
-  if (Array.isArray(mapProv) && Array.isArray(parts)) {
-    return { provinces: mapProv, participants: parts };
+  for (const raw of arr) {
+    const id = raw?.id;
+    if (!notEmpty(id)) continue;
+
+    const prev = prevIdx.get(id) || {};
+    const rec = {
+      id,
+      title: raw.name || raw.title || prev.title || "",
+      short: raw.short || prev.short || "",
+      ownerId: prev.ownerId ?? null,
+      lockedUntil: prev.lockedUntil ?? 0,
+      isAttackBattleType: prev.isAttackBattleType ?? false,
+    };
+    patch.push(rec);
   }
 
-  // альтернативи
-  if (Array.isArray(body?.provinces) && Array.isArray(body?.participants)) {
-    return { provinces: body.provinces, participants: body.participants };
+  // зливаємо: провінції з WS мають пріоритет у полях owner/lockedUntil
+  const merged = indexBy(STATE.provinces, "id");
+  for (const p of patch) {
+    if (merged.has(p.id)) {
+      const cur = merged.get(p.id);
+      merged.set(p.id, {
+        ...cur,
+        title: p.title || cur.title,
+        short: p.short || cur.short,
+      });
+    } else {
+      merged.set(p.id, p);
+    }
   }
-
-  return null;
+  STATE.provinces = Array.from(merged.values());
 }
 
-function normaliseProvinces(list) {
-  return asArray(list).map(p => ({
-    id: toInt(p.id),
-    title: p.title || p.name || "",
-    ownerId: p.ownerId ?? p.owner?.id ?? undefined,
-    lockedUntil: toInt(p.lockedUntil),
-    isAttackBattleType: !!(p.isAttackBattleType ?? (p.battleType === "red")),
-    conquestProgress: asArray(p.conquestProgress).map(cp => ({
-      participantId: cp.participantId,
-      progress: toInt(cp.progress),
-      maxProgress: toInt(cp.maxProgress)
-    }))
-  }));
-}
-
-// статичний JSON з провінціями часто має такий вигляд:
-// [{ id, name, short, connections:[...], flag:{x,y}, ... }, ...]
-function extractProvinceMeta(body) {
+// ——— прийом повідомлень від content.js ———
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   try {
-    const arr = Array.isArray(body) ? body : (Array.isArray(body?.provinces) ? body.provinces : []);
-    return asArray(arr).map(e => ({
-      id: toInt(e.id),
-      name: e.name || e.title || "",
-      short: e.short || "",
-      connections: asArray(e.connections).map(toInt)
-    })).filter(x => x.id >= 0);
-  } catch { return []; }
-}
+    if (msg?.type === "WS_GBG" && msg.json) {
+      applyWsBattleground(msg.json);
+    } else if (msg?.type === "HTTP_JSON" && msg.url && msg.json) {
+      // фільтрація: беремо лише `…/map/provinces/*.json`
+      if (/\/assets\/guild_battlegrounds\/map\/provinces\/.+\.json(\?|$)/i.test(msg.url)) {
+        applyHttpProvinces(msg.url, msg.json);
+      }
+    } else if (msg?.type === "getState") {
+      sendResponse({ state: STATE });
+      return; // важливо: для async відповіді
+    }
+  } catch (e) {
+    console.warn("bg parse error:", e);
+  }
+  // до popup ми не відповідаємо (крім getState)
+});
 
-function pickMeta(m) {
-  return {
-    title: m.name || "",
-    short: m.short || "",
-    connections: asArray(m.connections)
-  };
-}
-
-function enrichWithMeta(prov) {
-  if (!state.provinceMeta.length) return prov;
-  const metaById = new Map(state.provinceMeta.map(m => [m.id, m]));
-  return asArray(prov).map(p => {
-    const meta = metaById.get(p.id);
-    return meta ? { ...p, ...pickMeta(meta) } : p;
-    // (title із лайв-відповіді не перезаписуємо, якщо воно вже є)
-  });
-}
+// ——— відповідь для popup ———
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "getState") {
+    sendResponse({ state: STATE });
+  }
+});
